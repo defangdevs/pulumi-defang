@@ -49,8 +49,11 @@ jobs:
         id: tag
         run: |
           set -euo pipefail
-          BASE="$(git tag --sort=-v:refname | grep -v -- -preview | head -n1 | sed 's/^v//' | sed 's/-.*//')"
-          TAG="v${BASE}-preview.${{ github.run_number }}"
+          # Base on the latest stable tag; strip any prerelease suffix.
+          BASE="$(git tag --sort=-v:refname | grep -vE -- '-(alpha|beta|rc|preview)' | head -n1 | sed 's/^v//' | sed 's/-.*//')"
+          # "beta" because pulumictl only accepts alpha/beta/rc prerelease
+          # identifiers — "-preview.N" makes it error out and VERSION goes empty.
+          TAG="v${BASE}-beta.${{ github.run_number }}"
           # Annotated so `git tag --sort=creatordate` (defang-*.mk LATEST_TAG) picks it up.
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
