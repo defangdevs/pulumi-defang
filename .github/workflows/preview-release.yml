@@ -1,0 +1,104 @@
+# Preview releases for iterating on defang-mvp before an upstream release exists.
+#
+# Fork-only workflow (defangdevs/pulumi-defang): builds the given ref, tags it
+# v<base>-preview.<run_number>, and publishes a prerelease GitHub Release with
+# linux-amd64 provider plugin tarballs (goreleaser naming, so
+# `pulumi plugin install --server github://api.github.com/defangdevs/pulumi-defang`
+# works) plus npm-packed Node.js SDK tarballs. defang-mvp PR CI installs these
+# via its pulumi/defang-preview.json pin.
+name: preview-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to build preview providers from
+        required: true
+        default: feat/defang-on-defang-inputs
+
+permissions:
+  contents: write # push preview tag + create release
+
+env:
+  PROVIDERS: aws gcp azure
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Go build environment
+        uses: ./.github/actions/setup-go
+
+      - name: Install Pulumi CLI
+        uses: pulumi/actions@8582a9e8cc630786854029b4e09281acd6794b58 # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 24.x
+
+      - name: Pulumi local login
+        run: pulumi login --local # gen-sdk is local-only; no backend needed
+
+      - name: Create and push preview tag
+        id: tag
+        run: |
+          set -euo pipefail
+          BASE="$(git tag --sort=-v:refname | grep -v -- -preview | head -n1 | sed 's/^v//' | sed 's/-.*//')"
+          TAG="v${BASE}-preview.${{ github.run_number }}"
+          # Annotated so `git tag --sort=creatordate` (defang-*.mk LATEST_TAG) picks it up.
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Preview build of ${{ inputs.ref }}"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build provider binaries
+        run: make provider
+
+      - name: Build Node.js SDKs
+        run: make nodejs_sdk
+
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          mkdir -p dist
+          for p in $PROVIDERS; do
+            # goreleaser-compatible plugin tarball name, so `pulumi plugin install
+            # --server github://api.github.com/${{ github.repository }}` resolves it.
+            tar -czf "dist/pulumi-resource-defang-${p}-${TAG}-linux-amd64.tar.gz" \
+              -C bin "pulumi-resource-defang-${p}"
+            (cd "sdk/nodejs/defang-${p}/bin" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist")
+            mv dist/defang-io-pulumi-defang-"${p}"-*.tgz "dist/defang-${p}-nodejs.tgz"
+          done
+          ls -l dist
+
+      - name: Create prerelease
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          gh release create "$TAG" \
+            --prerelease \
+            --title "Preview $TAG (${{ inputs.ref }} @ $(git rev-parse --short HEAD))" \
+            --notes "Preview provider build of \`${{ inputs.ref }}\` for defang-mvp CI iteration. Not for production use." \
+            dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Preview release ${{ steps.tag.outputs.tag }}"
+            echo
+            echo "Pin in defang-mvp \`pulumi/defang-preview.json\`:"
+            echo '```json'
+            echo "{ \"repo\": \"${{ github.repository }}\", \"tag\": \"${{ steps.tag.outputs.tag }}\" }"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
